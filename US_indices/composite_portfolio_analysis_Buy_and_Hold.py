@@ -72,10 +72,15 @@ def calculate_xirr(flows, dates, guess=0.1):
     return rate
 
 
-def load_index_files(file_prefix, search_path='.', recursive=True):
+def load_index_files(file_prefix, search_path='.', recursive=True, data_format='auto'):
     """
-    Load all CSV files that contain the given prefix (case‑insensitive)
-    and return a combined DataFrame with columns 'Date' and 'Total Returns Index'.
+    Load CSV files matching the prefix.
+    
+    Parameters:
+    data_format : str, one of:
+        'auto' - auto-detect (default)
+        'levels' - data is actual index levels
+        'returns' - data is daily percentage returns (as fractions)
     """
     if recursive:
         pattern = os.path.join(search_path, '**', f'*{file_prefix}*.csv')
@@ -91,22 +96,47 @@ def load_index_files(file_prefix, search_path='.', recursive=True):
         try:
             df = pd.read_csv(fpath)
             df.columns = df.columns.str.strip()
-            # Identify the column that holds the index values
+            
+            # Identify the value column
             value_col = None
             for col in df.columns:
-                if 'total returns' in col.lower() or 'index value' in col.lower() or 'close' in col.lower():
+                col_lower = col.lower()
+                if ('total returns' in col_lower or 'index value' in col_lower or 
+                    'nav' in col_lower or 'price' in col_lower or 'close' in col_lower):
                     value_col = col
                     break
+            
             if value_col is None:
                 value_col = df.columns[-1]   # fallback
 
-            # Rename for consistency
-            # df = df.rename(columns={df.columns[0]: 'Date', value_col: 'Total Returns Index'})
+            # Standardize column names
+            df = df.rename(columns={df.columns[0]: 'Date', value_col: 'Raw_Value'})
             df['Date'] = df['Date'].apply(parse_date)
             df = df.dropna(subset=['Date'])
-            # df = df[['Date', 'Total Returns Index']].copy()
             df = df.sort_values('Date').drop_duplicates('Date')
+            
+            # Convert based on specified format
+            if data_format == 'returns':
+                # Convert daily returns to index levels (starting at 100)
+                df['Index_Value'] = (1 + df['Raw_Value']).cumprod() * 100
+                df['Index_Value'] = df['Index_Value'] / df['Index_Value'].iloc[0] * 100
+            elif data_format == 'levels':
+                df['Index_Value'] = df['Raw_Value']
+            else:  # auto-detect
+                sample = df['Raw_Value'].iloc[:10]
+                # Check if values are small fractions (typically between -1 and 1)
+                if sample.between(-1, 1).mean() > 0.8:
+                    # Likely returns format
+                    df['Index_Value'] = (1 + df['Raw_Value']).cumprod() * 100
+                    df['Index_Value'] = df['Index_Value'] / df['Index_Value'].iloc[0] * 100
+                else:
+                    df['Index_Value'] = df['Raw_Value']
+            
+            df = df[['Date', 'Index_Value']].copy()
+            # Added
+            df = df.rename(columns={'Index_Value': value_col})
             data_frames.append(df)
+            
         except Exception as e:
             print(f"   ⚠️  Error loading {os.path.basename(fpath)}: {e}")
             continue
@@ -118,12 +148,11 @@ def load_index_files(file_prefix, search_path='.', recursive=True):
     combined = combined.sort_values('Date').drop_duplicates('Date').reset_index(drop=True)
     return combined
 
-
 # =============================================================================
 # 2. PORTFOLIO CONSTRUCTION
 # =============================================================================
 
-def build_portfolio_series(portfolio_def, search_path='.', recursive=True, start_date=None, end_date=None):
+def build_portfolio_series(portfolio_def, search_path='.', recursive=True, start_date=None, end_date=None, data_format='auto'):
     """
     Build a daily portfolio value series from a list of (index_name, weight) pairs.
 
@@ -139,7 +168,7 @@ def build_portfolio_series(portfolio_def, search_path='.', recursive=True, start
     common_dates = None
 
     for idx_name, weight in portfolio_def:
-        df = load_index_files(idx_name, search_path, recursive)
+        df = load_index_files(idx_name, search_path, recursive, data_format=data_format)
         if df is None or len(df) == 0:
             raise ValueError(f"Could not load data for {idx_name}")
         df = df.rename(columns={'Total Returns Index': idx_name})
@@ -550,141 +579,6 @@ def build_portfolio_series_on_grid(portfolio_def, index_data, common_dates):
 # 5. MAIN FUNCTION: compare multiple portfolios
 # =============================================================================
 
-# def compare_portfolios(portfolio_list,
-#                        risk_free_rate=6.0,
-#                        sip_amount=10000,
-#                        sip_day=2,
-#                        trading_days_per_year=252,
-#                        rolling_periods=[3, 5, 7, 10],
-#                        show_plots=True,
-#                        export_csv=False,
-#                        plot_comparison=True,
-#                        search_path='.',
-#                        recursive=True,
-#                        output_fname="",
-#                        start_date=None,        # new
-#                        end_date=None):          # new):
-#     """
-#     Compare multiple composite portfolios.
-
-#     Parameters:
-#     -----------
-#     portfolio_list : list of dicts, each with keys:
-#         - 'name' : str, name of the portfolio
-#         - 'weights' : list of (index_name, weight) tuples
-#     All other parameters are the same as in analyze_portfolio.
-
-#     Returns:
-#     --------
-#     pd.DataFrame : combined summary of all portfolios.
-#     """
-#     all_results = {}
-#     all_data = {}
-
-#     print("=" * 100)
-#     print(f" COMPARING {len(portfolio_list)} PORTFOLIOS")
-#     print("=" * 100)
-
-#     for idx, port in enumerate(portfolio_list, 1):
-#         name = port['name']
-#         weights = port['weights']
-#         print(f"\n[{idx}/{len(portfolio_list)}] Processing: {name}")
-#         print("-" * 60)
-
-#         try:
-#             # Build portfolio series
-#             port_df = build_portfolio_series(weights, search_path, recursive,
-#                                              start_date=start_date,
-#                                              end_date=end_date)
-#             print(f"   Portfolio built: {port_df['Date'].min().date()} to "
-#                   f"{port_df['Date'].max().date()} ({len(port_df)} days)")
-
-#             # Analyze it
-#             results = analyze_portfolio(
-#                 portfolio_name=name,
-#                 portfolio_df=port_df,
-#                 risk_free_rate=risk_free_rate,
-#                 sip_amount=sip_amount,
-#                 sip_day=sip_day,
-#                 trading_days_per_year=trading_days_per_year,
-#                 rolling_periods=rolling_periods,
-#                 show_plots=show_plots,
-#                 export_csv=export_csv,
-#                 index_number=idx
-#             )
-
-#             if results and 'summary' in results:
-#                 all_results[name] = results['summary']
-#                 all_data[name] = {
-#                     'data': results.get('data'),
-#                     'sip_xirr': results.get('sip_xirr_series')
-#                 }
-#                 print(f"✅ Successfully processed: {name}")
-#             else:
-#                 print(f"⚠️  No results for: {name}")
-
-#         except Exception as e:
-#             print(f"❌ Error processing {name}: {str(e)}")
-#             continue
-
-#     if not all_results:
-#         print("\n❌ No portfolios could be processed.")
-#         return None
-
-#     # Combine all summaries into one DataFrame
-#     combined_df = pd.DataFrame(all_results).T
-
-#     # Reorder columns for clarity
-#     base_cols = [
-#         'Date Range', 'Total Trading Days', 'Start Value', 'End Value',
-#         'Total Return %', # --- new lines ---
-#         'SIP Invested Amt', 'SIP Final Amt', 
-#         'CAGR %', 'Annualized Volatility %', 'Sharpe Ratio',
-#         'Max Drawdown %', 'Max Drawdown Date', 'SIP XIRR %', 'SIP Return %',
-#         'Positive Days %', 'Negative Days %', 'Max Daily Return %', 'Min Daily Return %'
-#     ]
-#     order = base_cols[:]
-#     for p in rolling_periods:
-#         order.extend([f'{p}Y Rolling Avg %', f'{p}Y Rolling Median %',
-#                       f'{p}Y Rolling Min %', f'{p}Y Rolling Max %'])
-#     for y in range(5):
-#         yr = datetime.now().year - y
-#         order.append(f'{yr} Return %')
-#     existing = [c for c in order if c in combined_df.columns]
-#     combined_df = combined_df[existing]
-
-#     # Display the summary
-#     print("\n📊 COMBINED SUMMARY - ALL PORTFOLIOS")
-#     print("=" * 100)
-#     display_df = combined_df.copy()
-#     for col in display_df.columns:
-#         if any(x in col for x in ['Return', 'CAGR', 'Volatility', 'Drawdown']):
-#             if display_df[col].dtype in [np.float64, np.int64]:
-#                 display_df[col] = display_df[col].round(2).astype(str) + '%'
-#                 # --- new formatting ---
-#         elif 'Invested Amt' in col or 'Final Amt' in col:
-#             if display_df[col].dtype in [np.float64, np.int64]:
-#                 display_df[col] = display_df[col].round(2).astype(str)  # no percent sign
-#         # ---------------------
-#         elif 'Sharpe' in col:
-#             display_df[col] = display_df[col].round(3)
-#         elif 'XIRR' in col:
-#             display_df[col] = display_df[col].round(2).astype(str) + '%'
-#     print(display_df.to_string())
-
-#     # Comparison plots
-#     if plot_comparison and len(all_results) > 1:
-#         plot_portfolio_comparison(all_data, all_results, rolling_periods)
-#         plot_running_xirr_comparison(all_data, all_results)
-
-#     # Export if requested
-#     if export_csv:
-#         fname = f'portfolios_comparison_summary_{output_fname}.csv' if output_fname else 'portfolios_comparison_summary.csv'
-#         combined_df.to_csv(fname)
-#         print(f"\n📁 Exported: {fname}")
-
-#     return combined_df
-
 
 def compare_portfolios(portfolio_list,
                        risk_free_rate=6.0,
@@ -699,7 +593,8 @@ def compare_portfolios(portfolio_list,
                        recursive=True,
                        output_fname="",
                        start_date=None,
-                       end_date=None):
+                       end_date=None,
+                       data_format = 'auto'):
     """
     Compare multiple composite portfolios using a common date grid.
     All portfolios are evaluated on exactly the same set of dates.
@@ -728,7 +623,7 @@ def compare_portfolios(portfolio_list,
     common_dates = None
 
     for idx_name in all_index_names:
-        df = load_index_files(idx_name, search_path, recursive)
+        df = load_index_files(idx_name, search_path, recursive, data_format=data_format)
         if df is None or len(df) == 0:
             raise ValueError(f"Could not load data for {idx_name}")
         df = df.rename(columns={'Total Returns Index': idx_name})
