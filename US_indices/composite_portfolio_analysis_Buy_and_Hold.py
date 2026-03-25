@@ -575,6 +575,96 @@ def build_portfolio_series_on_grid(portfolio_def, index_data, common_dates):
     }).reset_index(drop=True)
     return result
 
+def plot_running_cagr_comparison(all_data, all_results, period_years, trading_days_per_year=252):
+    """
+    Plot running X‑year CAGR for one or more portfolios (common date range).
+    
+    Parameters:
+    -----------
+    all_data : dict
+        Dictionary containing portfolio data and XIRR series
+    all_results : dict
+        Dictionary containing portfolio summary statistics
+    period_years : int
+        Number of years for the rolling CAGR calculation (e.g., 3, 5, 10)
+    trading_days_per_year : int, default=252
+        Number of trading days in a year
+    """
+    if not all_data:
+        print("⚠️  No data to plot.")
+        return
+
+    # Collect all portfolio dataframes
+    data_list = []
+    for name, ddict in all_data.items():
+        df = ddict.get('data')
+        if df is not None and len(df) > 0:
+            data_list.append((name, df))
+
+    if len(data_list) == 0:
+        print("⚠️  No valid portfolio data for running CAGR plot.")
+        return
+
+    # Determine common date range across all portfolio data
+    start_dates = [df['Date'].min() for _, df in data_list]
+    end_dates   = [df['Date'].max() for _, df in data_list]
+    common_start = max(start_dates)
+    common_end   = min(end_dates)
+
+    if common_start > common_end:
+        print("⚠️  No overlapping date range for running CAGR plot.")
+        return
+
+    print(f"   📅 Common CAGR period ({period_years}Y): {common_start.date()} to {common_end.date()}")
+
+    # Compute rolling CAGR for each portfolio on the common grid
+    window_days = int(period_years * trading_days_per_year)
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+    colors = plt.cm.Set1(np.linspace(0, 1, len(data_list)))
+
+    # Track if we have any valid data to plot
+    plotted_any = False
+
+    for idx, (name, df_full) in enumerate(data_list):
+        # Slice to common dates
+        mask = (df_full['Date'] >= common_start) & (df_full['Date'] <= common_end)
+        df = df_full.loc[mask].copy().reset_index(drop=True)
+
+        if len(df) <= window_days:
+            print(f"   ⚠️  {name}: insufficient data for {period_years}‑year rolling CAGR (need {window_days} days, have {len(df)} days).")
+            continue
+
+        rolling_cagr = []
+        rolling_dates = []
+
+        for i in range(window_days, len(df)):
+            start_val = df.loc[i - window_days, 'Portfolio_Value']
+            end_val   = df.loc[i, 'Portfolio_Value']
+            cagr = ((end_val / start_val) ** (1 / period_years) - 1) * 100
+            rolling_cagr.append(cagr)
+            rolling_dates.append(df.loc[i, 'Date'])
+
+        if rolling_cagr:
+            plotted_any = True
+            ax.plot(rolling_dates, rolling_cagr, linewidth=2, color=colors[idx], label=name[:30])
+
+    if not plotted_any:
+        print(f"⚠️  No portfolios had sufficient data for {period_years}‑year rolling CAGR.")
+        ax.text(0.5, 0.5, f'Insufficient data for {period_years}‑year CAGR',
+                ha='center', va='center', transform=ax.transAxes, fontsize=14)
+    else:
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=1)
+        ax.legend(loc='best')
+    
+    ax.set_title(f'Running {period_years}‑Year CAGR (Common Period)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Date')
+    ax.set_ylabel(f'{period_years}‑Y CAGR (%)')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+
 # =============================================================================
 # 5. MAIN FUNCTION: compare multiple portfolios
 # =============================================================================
@@ -595,7 +685,9 @@ def compare_portfolios(portfolio_list,
                        start_date=None,
                        end_date=None,
                        data_format = 'auto',
-                       plot_running_xirr=True):
+                       plot_running_xirr=False,
+                       plot_running_cagr = True,
+                       running_cagr_periods=[3]):
     """
     Compare multiple composite portfolios using a common date grid.
     All portfolios are evaluated on exactly the same set of dates.
@@ -743,10 +835,15 @@ def compare_portfolios(portfolio_list,
     print(display_df.to_string())
 
     # Generate comparison plots (they now automatically use the common grid)
-    if plot_comparison and len(all_results) > 0:
+    if len(all_results) > 0:
+        print("\n📈 Generating comparison plots...")
+    if plot_comparison:
         plot_portfolio_comparison(all_data, all_results, rolling_periods)
-    if plot_running_xirr and len(all_results) > 0 : 
+    if plot_running_xirr > 0 : 
         plot_running_xirr_comparison(all_data, all_results)
+    if plot_running_cagr > 0:
+        for period in running_cagr_periods:
+            plot_running_cagr_comparison(all_data, all_results, period)
 
     if export_csv:
         fname = f'portfolios_comparison_summary_{output_fname}.csv' if output_fname else 'portfolios_comparison_summary.csv'
