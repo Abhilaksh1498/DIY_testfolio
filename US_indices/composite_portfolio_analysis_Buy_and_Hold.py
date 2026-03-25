@@ -447,7 +447,7 @@ def plot_single_portfolio(df, portfolio_name, index_number, rolling_periods, rol
 def plot_portfolio_comparison(all_data, all_results, rolling_periods):
     """Comparison dashboard for multiple portfolios."""
     num = len(all_data)
-    if num < 2:
+    if num < 1:
         return
     colors = plt.cm.Set1(np.linspace(0, 1, num))
     fig, axes = plt.subplots(2, 2, figsize=(18, 12))
@@ -594,7 +594,8 @@ def compare_portfolios(portfolio_list,
                        output_fname="",
                        start_date=None,
                        end_date=None,
-                       data_format = 'auto'):
+                       data_format = 'auto',
+                       plot_running_xirr=True):
     """
     Compare multiple composite portfolios using a common date grid.
     All portfolios are evaluated on exactly the same set of dates.
@@ -742,8 +743,9 @@ def compare_portfolios(portfolio_list,
     print(display_df.to_string())
 
     # Generate comparison plots (they now automatically use the common grid)
-    if plot_comparison and len(all_results) > 1:
+    if plot_comparison and len(all_results) > 0:
         plot_portfolio_comparison(all_data, all_results, rolling_periods)
+    if plot_running_xirr and len(all_results) > 0 : 
         plot_running_xirr_comparison(all_data, all_results)
 
     if export_csv:
