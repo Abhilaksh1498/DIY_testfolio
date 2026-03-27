@@ -22,6 +22,9 @@ import glob
 import os
 from datetime import datetime
 import warnings
+from IPython.display import display, clear_output
+from ipywidgets import interact, IntSlider, FloatSlider, VBox, Output
+
 warnings.filterwarnings('ignore')
 
 # =============================================================================
@@ -731,7 +734,220 @@ def plot_running_cagr_comparison(all_data, all_results, period_years, trading_da
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
+
+def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days_per_year=252,
+                                             show_percentiles=False, rolling_percentiles_to_show=[5, 25, 50, 75, 95],
+                                             available_periods=[3, 5, 7, 10]):
+    """
+    Interactive plot of running X‑year CAGR with period slider widget.
     
+    Parameters:
+    -----------
+    all_data : dict
+        Dictionary containing portfolio data
+    all_results : dict
+        Dictionary containing portfolio summary statistics
+    trading_days_per_year : int, default=252
+        Number of trading days in a year
+    show_percentiles : bool, default=False
+        Whether to display horizontal percentile lines
+    rolling_percentiles_to_show : list, default=[5, 25, 50, 75, 95]
+        Percentiles to plot as horizontal lines
+    available_periods : list, default=[3, 5, 7, 10]
+        Available rolling periods for the slider (min, max, step will be auto-detected)
+    """
+    if not all_data:
+        print("⚠️  No data to plot.")
+        return
+
+    # Collect all portfolio dataframes
+    data_list = []
+    for name, ddict in all_data.items():
+        df = ddict.get('data')
+        if df is not None and len(df) > 0:
+            data_list.append((name, df))
+
+    if len(data_list) == 0:
+        print("⚠️  No valid portfolio data for running CAGR plot.")
+        return
+
+    num_portfolios = len(data_list)
+    is_single_portfolio = (num_portfolios == 1)
+    
+    # Determine slider range
+    min_period = min(available_periods)
+    max_period = max(available_periods)
+    
+    # Determine step size
+    if all(isinstance(p, int) for p in available_periods):
+        step = 1
+    else:
+        sorted_periods = sorted(available_periods)
+        differences = [sorted_periods[i+1] - sorted_periods[i] for i in range(len(sorted_periods)-1)]
+        step = min(differences) if differences else 0.5
+    
+    # Determine common date range across all portfolio data (same for all periods)
+    start_dates = [df['Date'].min() for _, df in data_list]
+    end_dates   = [df['Date'].max() for _, df in data_list]
+    common_start = max(start_dates)
+    common_end   = min(end_dates)
+    
+    # Pre-compute rolling returns for all periods to avoid recalculation
+    print("📊 Precomputing rolling returns for all periods...")
+    rolling_data_cache = {}
+    
+    for period_years in available_periods:
+        print(f"   Computing {period_years}Y rolling returns...")
+        
+        window_days = int(period_years * trading_days_per_year)
+        
+        # Store rolling returns for each portfolio
+        portfolio_rolling_data = []
+        all_rolling_returns = []
+        
+        for name, df_full in data_list:
+            mask = (df_full['Date'] >= common_start) & (df_full['Date'] <= common_end)
+            df = df_full.loc[mask].copy().reset_index(drop=True)
+            
+            if len(df) <= window_days:
+                print(f"   ⚠️  {name}: insufficient data for {period_years}‑year rolling CAGR")
+                continue
+            
+            rolling_cagr = []
+            rolling_dates = []
+            
+            for i in range(window_days, len(df)):
+                start_val = df.loc[i - window_days, 'Portfolio_Value']
+                end_val   = df.loc[i, 'Portfolio_Value']
+                cagr = ((end_val / start_val) ** (1 / period_years) - 1) * 100
+                rolling_cagr.append(cagr)
+                rolling_dates.append(df.loc[i, 'Date'])
+            
+            if rolling_cagr:
+                portfolio_rolling_data.append((name, rolling_dates, rolling_cagr))
+                all_rolling_returns.extend(rolling_cagr)
+        
+        rolling_data_cache[period_years] = {
+            'common_start': common_start,
+            'common_end': common_end,
+            'portfolio_data': portfolio_rolling_data,
+            'all_rolling_returns': all_rolling_returns,
+            'window_days': window_days,
+            'num_portfolios': len(portfolio_rolling_data)
+        }
+    
+    print("✅ Precomputation complete!\n")
+    
+    # Define the plotting function that will be called by interact
+    def plot_period(period_years):
+        """Plot running CAGR for the selected period"""
+        
+        # Get cached data for this period
+        cache = rolling_data_cache.get(period_years)
+        if not cache:
+            print(f"⚠️  No data available for {period_years}Y period")
+            return
+        
+        portfolio_data = cache['portfolio_data']
+        all_rolling_returns = cache['all_rolling_returns']
+        
+        if not portfolio_data:
+            print(f"⚠️  No portfolio data available for {period_years}Y period")
+            return
+        
+        # Create new figure
+        fig, ax = plt.subplots(figsize=(14, 8))
+        colors = plt.cm.Set1(np.linspace(0, 1, len(portfolio_data)))
+        
+        # Plot each portfolio
+        for idx, (name, rolling_dates, rolling_cagr) in enumerate(portfolio_data):
+            ax.plot(rolling_dates, rolling_cagr, linewidth=2, color=colors[idx], 
+                    label=name[:30], alpha=0.8)
+        
+        # Add percentile lines if requested
+        if show_percentiles and all_rolling_returns:
+            print(f"\n   📊 {period_years}Y Rolling Returns Percentiles:")
+            
+            # Get label position (left edge)
+            label_x = portfolio_data[0][1][0]  # First date of first portfolio
+            
+            # Plot percentiles
+            for p in sorted(rolling_percentiles_to_show):
+                value = np.percentile(all_rolling_returns, p)
+                
+                # Draw dashed black horizontal line
+                ax.axhline(y=value, color='black', linestyle='--', 
+                           linewidth=1.5, alpha=0.6)
+                
+                # Add label
+                if p <= 50:
+                    va = 'bottom'
+                    y_offset = 0.3
+                else:
+                    va = 'top'
+                    y_offset = -0.3
+                
+                ax.text(label_x, value + y_offset, f'{p}th ({value:.1f}%)', 
+                        fontsize=9, color='black', va=va, ha='left',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', 
+                                 alpha=0.8, edgecolor='none'))
+                
+                print(f"      {p}th: {value:.2f}%")
+            
+            print(f"      Total observations: {len(all_rolling_returns):,}")
+        
+        # Add zero line
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+        
+        # Add legend
+        if portfolio_data:
+            ax.legend(loc='best', fontsize=10)
+        
+        # Add title
+        if show_percentiles and not is_single_portfolio:
+            title = f'Running {period_years}‑Year CAGR (Combined Percentiles from {len(portfolio_data)} Portfolios)'
+        else:
+            title = f'Running {period_years}‑Year CAGR (Common Period)'
+        
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel('Date')
+        ax.set_ylabel(f'{period_years}‑Y CAGR (%)')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+    
+    # Create the interactive slider using ipywidgets interact
+    print("=" * 80)
+    print(" INTERACTIVE RUNNING CAGR PLOT")
+    print("=" * 80)
+    print("Use the slider below to adjust the rolling period")
+    print("-" * 80)
+    
+    # Create slider with interact (this automatically creates ONE slider)
+    # For integer periods
+    if step == 1 and all(isinstance(p, int) for p in available_periods):
+        interact(plot_period, period_years=IntSlider(
+            value=min_period,
+            min=min_period,
+            max=max_period,
+            step=step,
+            description='Rolling Period (years):',
+            style={'description_width': 'initial'},
+            layout={'width': '400px'}
+        ))
+    else:
+        # For float periods
+        interact(plot_period, period_years=FloatSlider(
+            value=min_period,
+            min=min_period,
+            max=max_period,
+            step=step,
+            description='Rolling Period (years):',
+            style={'description_width': 'initial'},
+            layout={'width': '400px'}
+        ))
+
+
 def display_rolling_returns_summary(all_data, rolling_periods=[3, 5, 7, 10], 
                                     percentiles=[5, 25, 50, 75, 95], 
                                     trading_days_per_year=252):
@@ -860,6 +1076,7 @@ def compare_portfolios(portfolio_list,
                        plot_rolling_returns_percentiles=True,
                        rolling_percentiles_to_show=[5, 10, 50, 90, 95],
                        display_rolling_returns_table=True,
+                       interactive_cagr=False
                        ):
     """
     Compare multiple composite portfolios using a common date grid.
@@ -1018,13 +1235,23 @@ def compare_portfolios(portfolio_list,
             plot_portfolio_comparison(all_data, all_results, rolling_periods)
         if plot_running_xirr > 0 : 
             plot_running_xirr_comparison(all_data, all_results)
-        if plot_running_cagr > 0:
-            for period in running_cagr_periods:
-                plot_running_cagr_comparison(
-                    all_data, all_results, period, trading_days_per_year,
+        if plot_running_cagr:
+            if interactive_cagr:
+                # Use interactive widget with all available periods
+                plot_running_cagr_comparison_interactive(
+                    all_data, all_results, trading_days_per_year,
                     show_percentiles=plot_rolling_returns_percentiles,
-                    rolling_percentiles_to_show=rolling_percentiles_to_show
+                    rolling_percentiles_to_show=rolling_percentiles_to_show,
+                    available_periods=running_cagr_periods
                 )
+            else:
+                # Original behavior: separate plots
+                for period in running_cagr_periods:
+                    plot_running_cagr_comparison(
+                        all_data, all_results, period, trading_days_per_year,
+                        show_percentiles=plot_rolling_returns_percentiles,
+                        rolling_percentiles_to_show=rolling_percentiles_to_show
+                    )
 
     if export_csv:
         fname = f'portfolios_comparison_summary_{output_fname}.csv' if output_fname else 'portfolios_comparison_summary.csv'
