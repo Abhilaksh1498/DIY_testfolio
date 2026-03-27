@@ -23,7 +23,9 @@ import os
 from datetime import datetime
 import warnings
 from IPython.display import display, clear_output
-from ipywidgets import interact, IntSlider, FloatSlider, VBox, Output
+from ipywidgets import interact, IntSlider, FloatSlider, VBox, Output, SelectionSlider
+import matplotlib.dates as mdates
+
 
 warnings.filterwarnings('ignore')
 
@@ -737,24 +739,10 @@ def plot_running_cagr_comparison(all_data, all_results, period_years, trading_da
 
 def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days_per_year=252,
                                              show_percentiles=False, rolling_percentiles_to_show=[5, 25, 50, 75, 95],
-                                             available_periods=[3, 5, 7, 10]):
+                                             available_periods=[2.5, 3, 4, 5, 7, 10]):
     """
-    Interactive plot of running X‑year CAGR with period slider widget.
-    
-    Parameters:
-    -----------
-    all_data : dict
-        Dictionary containing portfolio data
-    all_results : dict
-        Dictionary containing portfolio summary statistics
-    trading_days_per_year : int, default=252
-        Number of trading days in a year
-    show_percentiles : bool, default=False
-        Whether to display horizontal percentile lines
-    rolling_percentiles_to_show : list, default=[5, 25, 50, 75, 95]
-        Percentiles to plot as horizontal lines
-    available_periods : list, default=[3, 5, 7, 10]
-        Available rolling periods for the slider (min, max, step will be auto-detected)
+    Interactive plot of running X‑year CAGR with selection slider.
+    Slider snaps to only the precomputed periods (can be irregularly spaced).
     """
     if not all_data:
         print("⚠️  No data to plot.")
@@ -774,29 +762,22 @@ def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days
     num_portfolios = len(data_list)
     is_single_portfolio = (num_portfolios == 1)
     
-    # Determine slider range
-    min_period = min(available_periods)
-    max_period = max(available_periods)
+    # Sort periods for consistent order
+    sorted_periods = sorted(available_periods)
+    min_period = min(sorted_periods)
+    max_period = max(sorted_periods)
     
-    # Determine step size
-    if all(isinstance(p, int) for p in available_periods):
-        step = 1
-    else:
-        sorted_periods = sorted(available_periods)
-        differences = [sorted_periods[i+1] - sorted_periods[i] for i in range(len(sorted_periods)-1)]
-        step = min(differences) if differences else 0.5
-    
-    # Determine common date range across all portfolio data (same for all periods)
+    # Determine common date range across all portfolio data
     start_dates = [df['Date'].min() for _, df in data_list]
     end_dates   = [df['Date'].max() for _, df in data_list]
     common_start = max(start_dates)
     common_end   = min(end_dates)
     
-    # Pre-compute rolling returns for all periods to avoid recalculation
+    # Pre-compute rolling returns for all periods
     print("📊 Precomputing rolling returns for all periods...")
     rolling_data_cache = {}
     
-    for period_years in available_periods:
+    for period_years in sorted_periods:
         print(f"   Computing {period_years}Y rolling returns...")
         
         window_days = int(period_years * trading_days_per_year)
@@ -838,7 +819,7 @@ def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days
     
     print("✅ Precomputation complete!\n")
     
-    # Define the plotting function that will be called by interact
+    # Define the plotting function
     def plot_period(period_years):
         """Plot running CAGR for the selected period"""
         
@@ -869,7 +850,7 @@ def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days
             print(f"\n   📊 {period_years}Y Rolling Returns Percentiles:")
             
             # Get label position (left edge)
-            label_x = portfolio_data[0][1][0]  # First date of first portfolio
+            label_x = portfolio_data[0][1][0]
             
             # Plot percentiles
             for p in sorted(rolling_percentiles_to_show):
@@ -912,41 +893,50 @@ def plot_running_cagr_comparison_interactive(all_data, all_results, trading_days
         ax.set_title(title, fontsize=14, fontweight='bold')
         ax.set_xlabel('Date')
         ax.set_ylabel(f'{period_years}‑Y CAGR (%)')
-        ax.grid(True, alpha=0.3)
+        
+        # ===== GRIDLINES =====
+        # Set major ticks (every 2 years)
+        ax.xaxis.set_major_locator(mdates.YearLocator(base=2))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        
+        # Set minor ticks (every 6 months)
+        ax.xaxis.set_minor_locator(mdates.MonthLocator(bymonth=[1, 7]))
+        
+        # Enable gridlines
+        ax.grid(True, which='major', alpha=0.3, linestyle='-', linewidth=0.8)
+        ax.grid(True, which='minor', axis='x', alpha=0.2, linestyle=':', linewidth=0.5)
+        
+        # Optional: Minor gridlines on y-axis
+        from matplotlib.ticker import AutoMinorLocator
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+        ax.grid(True, which='minor', axis='y', alpha=0.15, linestyle=':', linewidth=0.5)
+        
+        # Rotate x-axis labels
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        # ====================
+        
         plt.tight_layout()
         plt.show()
     
-    # Create the interactive slider using ipywidgets interact
+    # Create the SelectionSlider that snaps to irregular values
     print("=" * 80)
     print(" INTERACTIVE RUNNING CAGR PLOT")
     print("=" * 80)
-    print("Use the slider below to adjust the rolling period")
+    print(f"Rolling periods available: {sorted_periods}")
+    print("Use the slider below to select the rolling period")
     print("-" * 80)
     
-    # Create slider with interact (this automatically creates ONE slider)
-    # For integer periods
-    if step == 1 and all(isinstance(p, int) for p in available_periods):
-        interact(plot_period, period_years=IntSlider(
-            value=min_period,
-            min=min_period,
-            max=max_period,
-            step=step,
-            description='Rolling Period (years):',
-            style={'description_width': 'initial'},
-            layout={'width': '400px'}
-        ))
-    else:
-        # For float periods
-        interact(plot_period, period_years=FloatSlider(
-            value=min_period,
-            min=min_period,
-            max=max_period,
-            step=step,
-            description='Rolling Period (years):',
-            style={'description_width': 'initial'},
-            layout={'width': '400px'}
-        ))
-
+    # Create SelectionSlider with irregularly spaced values
+    selection_slider = SelectionSlider(
+        options=sorted_periods,
+        value=min_period,
+        description='Rolling Period (years):',
+        style={'description_width': 'initial'},
+        layout={'width': '500px'}
+    )
+    
+    # Display the interactive widget
+    interact(plot_period, period_years=selection_slider)
 
 def display_rolling_returns_summary(all_data, rolling_periods=[3, 5, 7, 10], 
                                     percentiles=[5, 25, 50, 75, 95], 
