@@ -575,20 +575,25 @@ def build_portfolio_series_on_grid(portfolio_def, index_data, common_dates):
     }).reset_index(drop=True)
     return result
 
-def plot_running_cagr_comparison(all_data, all_results, period_years, trading_days_per_year=252):
+def plot_running_cagr_comparison(all_data, all_results, period_years, trading_days_per_year=252,
+                                 show_percentiles=False, rolling_percentiles_to_show=[5, 25, 50, 75, 95]):
     """
-    Plot running X‑year CAGR for one or more portfolios (common date range).
+    Plot running X‑year CAGR for one or more portfolios.
+    
+    Percentile behavior:
+    - Single portfolio: Shows percentiles for that portfolio
+    - Multiple portfolios: Shows percentiles for combined data (all portfolios together)
+                          Warning is printed when percentiles are shown with multiple portfolios
+    
+    Percentile labels are placed directly on the horizontal lines (no legend entries)
+    All percentile lines use dashed black style
     
     Parameters:
     -----------
-    all_data : dict
-        Dictionary containing portfolio data and XIRR series
-    all_results : dict
-        Dictionary containing portfolio summary statistics
-    period_years : int
-        Number of years for the rolling CAGR calculation (e.g., 3, 5, 10)
-    trading_days_per_year : int, default=252
-        Number of trading days in a year
+    show_percentiles : bool, default=False
+        Whether to display horizontal percentile lines
+    rolling_percentiles_to_show : list, default=[5, 25, 50, 75, 95]
+        Percentiles to plot as horizontal lines
     """
     if not all_data:
         print("⚠️  No data to plot.")
@@ -604,6 +609,15 @@ def plot_running_cagr_comparison(all_data, all_results, period_years, trading_da
     if len(data_list) == 0:
         print("⚠️  No valid portfolio data for running CAGR plot.")
         return
+
+    num_portfolios = len(data_list)
+    is_single_portfolio = (num_portfolios == 1)
+    
+    # Print warning if showing percentiles with multiple portfolios
+    if show_percentiles and not is_single_portfolio:
+        print(f"⚠️  WARNING: Showing percentiles for {num_portfolios} portfolios")
+        print(f"   Percentile lines will be calculated on COMBINED data from all portfolios")
+        print(f"   Individual portfolio percentiles are not displayed to avoid clutter\n")
 
     # Determine common date range across all portfolio data
     start_dates = [df['Date'].min() for _, df in data_list]
@@ -621,11 +635,13 @@ def plot_running_cagr_comparison(all_data, all_results, period_years, trading_da
     window_days = int(period_years * trading_days_per_year)
 
     fig, ax = plt.subplots(figsize=(14, 8))
-    colors = plt.cm.Set1(np.linspace(0, 1, len(data_list)))
-
-    # Track if we have any valid data to plot
-    plotted_any = False
-
+    colors = plt.cm.Set1(np.linspace(0, 1, num_portfolios))
+    
+    # Store all rolling returns for percentile calculation
+    all_rolling_returns = []
+    plotted_portfolios = []
+    
+    # First pass: collect all rolling returns and plot lines
     for idx, (name, df_full) in enumerate(data_list):
         # Slice to common dates
         mask = (df_full['Date'] >= common_start) & (df_full['Date'] <= common_end)
@@ -646,24 +662,177 @@ def plot_running_cagr_comparison(all_data, all_results, period_years, trading_da
             rolling_dates.append(df.loc[i, 'Date'])
 
         if rolling_cagr:
-            plotted_any = True
-            ax.plot(rolling_dates, rolling_cagr, linewidth=2, color=colors[idx], label=name[:30])
+            plotted_portfolios.append((name, rolling_dates, rolling_cagr, colors[idx]))
+            ax.plot(rolling_dates, rolling_cagr, linewidth=2, color=colors[idx], label=name[:30], alpha=0.8)
+            
+            # Collect for combined percentiles (ONCE per portfolio, outside the inner loop)
+            all_rolling_returns.extend(rolling_cagr)
 
-    if not plotted_any:
+    # Add horizontal percentile lines with direct labels (no legend entries)
+    if show_percentiles and all_rolling_returns:
+        percentile_values = {}
+        print(f"\n   📊 {period_years}Y Rolling Returns Percentiles:")
+        
+        # Get the x-axis range for placing labels
+        if plotted_portfolios:
+            # Use the first portfolio's date range for label placement
+            first_dates = plotted_portfolios[0][1]
+            if first_dates:
+                label_x = first_dates[0]  # Place at left edge
+            else:
+                label_x = common_start
+        else:
+            label_x = common_start
+        
+        # Calculate and plot percentiles
+        for p in sorted(rolling_percentiles_to_show):
+            value = np.percentile(all_rolling_returns, p)
+            percentile_values[p] = value
+            
+            # Draw dashed black horizontal line
+            ax.axhline(y=value, color='black', linestyle='--', 
+                       linewidth=1.5, alpha=0.6)
+            
+            # Add label directly on the line
+            # Alternate label position above/below to avoid overlap
+            if p <= 50:
+                va = 'bottom'
+                y_offset = 0.3
+            else:
+                va = 'top'
+                y_offset = -0.3
+            
+            ax.text(label_x, value + y_offset, f'{p}th ({value:.1f}%)', 
+                    fontsize=9, color='black', va=va, ha='left',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8, edgecolor='none'))
+            
+            print(f"      {p}th: {value:.2f}%")
+        
+        print(f"      Source: Combined data from {num_portfolios} portfolio(s)")
+        print(f"      Total observations: {len(all_rolling_returns):,}")
+
+    if not plotted_portfolios:
         print(f"⚠️  No portfolios had sufficient data for {period_years}‑year rolling CAGR.")
         ax.text(0.5, 0.5, f'Insufficient data for {period_years}‑year CAGR',
                 ha='center', va='center', transform=ax.transAxes, fontsize=14)
     else:
-        ax.axhline(y=0, color='black', linestyle='--', linewidth=1)
-        ax.legend(loc='best')
+        ax.axhline(y=0, color='black', linestyle='--', linewidth=1, alpha=0.5)
+        ax.legend(loc='best', fontsize=10)
     
-    ax.set_title(f'Running {period_years}‑Year CAGR (Common Period)', fontsize=14, fontweight='bold')
+    # Add title with context about percentiles
+    if show_percentiles and not is_single_portfolio:
+        title = f'Running {period_years}‑Year CAGR (Combined Percentiles from {num_portfolios} Portfolios)'
+    else:
+        title = f'Running {period_years}‑Year CAGR (Common Period)'
+    
+    ax.set_title(title, fontsize=14, fontweight='bold')
     ax.set_xlabel('Date')
     ax.set_ylabel(f'{period_years}‑Y CAGR (%)')
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
+    
+def display_rolling_returns_summary(all_data, rolling_periods=[3, 5, 7, 10], 
+                                    percentiles=[5, 25, 50, 75, 95], 
+                                    trading_days_per_year=252):
+    """
+    Display a consolidated summary table of rolling X-year returns percentiles.
+    """
+    print("\n" + "=" * 100)
+    print(" ROLLING X-YEAR RETURNS PERCENTILE SUMMARY")
+    print("=" * 100)
+    
+    # Collect all results
+    all_rows = []
+    
+    for period in rolling_periods:
+        results = calculate_rolling_returns_percentiles(all_data, period, percentiles, trading_days_per_year)
+        
+        if not results:
+            continue
+        
+        for name, stats in results.items():
+            row = {
+                'Portfolio': name[:40],
+                'Period (Yrs)': period,
+                'Count': stats['count'],
+                'Mean %': round(stats['mean'], 2),
+                'Median %': round(stats['median'], 2),
+                'Std %': round(stats['std'], 2)
+            }
+            for p in percentiles:
+                row[f'{p}th %'] = round(stats['percentiles'][f'p{p}'], 2)
+            all_rows.append(row)
+    
+    if not all_rows:
+        print("   No data available for rolling returns calculation")
+        return
+    
+    # Create DataFrame
+    df = pd.DataFrame(all_rows)
+    
+    # Reorder columns for better readability
+    column_order = ['Portfolio', 'Period (Yrs)', 'Count', 'Mean %', 'Median %', 'Std %'] + [f'{p}th %' for p in percentiles]
+    df = df[column_order]
+    
+    # Display the DataFrame
+    print("\n📊 CONSOLIDATED ROLLING RETURNS SUMMARY")
+    print(df.to_string(index=False))
+    
+    # Add brief interpretation
+    print("\n" + "=" * 100)
+    # print("Interpretation: These percentiles show the distribution of X-year rolling returns.")
+    # print(f"  • {percentiles[0]}th percentile: {percentiles[0]}% of periods had returns BELOW this value")
+    # print(f"  • 50th (Median): Typical return for the period")
+    # print(f"  • {percentiles[-1]}th percentile: {percentiles[-1]}% of periods had returns ABOVE this value")
+    print("=" * 100)
 
+def calculate_rolling_returns_percentiles(all_data, period_years, percentiles=[5, 25, 50, 75, 95], trading_days_per_year=252):
+    """
+    Calculate rolling returns percentiles across all portfolios.
+    
+    Parameters:
+    -----------
+    all_data : dict
+        Dictionary containing portfolio data
+    period_years : int
+        Rolling period in years
+    percentiles : list
+        List of percentiles to compute (e.g., [5, 25, 50, 75, 95])
+    trading_days_per_year : int, default=252
+        Number of trading days in a year
+    
+    Returns:
+    --------
+    dict: Dictionary with percentiles for each portfolio and overall
+    """
+    window_days = int(period_years * trading_days_per_year)
+    results = {}
+    
+    for name, ddict in all_data.items():
+        df = ddict.get('data')
+        if df is None or len(df) <= window_days:
+            print(f"   ⚠️  {name}: insufficient data for {period_years}‑year rolling returns")
+            continue
+        
+        rolling_returns = []
+        for i in range(window_days, len(df)):
+            start_val = df.loc[i - window_days, 'Portfolio_Value']
+            end_val = df.loc[i, 'Portfolio_Value']
+            ann_return = ((end_val / start_val) ** (1 / period_years) - 1) * 100
+            rolling_returns.append(ann_return)
+        
+        if rolling_returns:
+            results[name] = {
+                'data': rolling_returns,
+                'percentiles': {f'p{p}': np.percentile(rolling_returns, p) for p in percentiles},
+                'count': len(rolling_returns),
+                'mean': np.mean(rolling_returns),
+                'median': np.median(rolling_returns),
+                'std': np.std(rolling_returns)
+            }
+    
+    return results
 
 # =============================================================================
 # 5. MAIN FUNCTION: compare multiple portfolios
@@ -687,7 +856,11 @@ def compare_portfolios(portfolio_list,
                        data_format = 'auto',
                        plot_running_xirr=False,
                        plot_running_cagr = True,
-                       running_cagr_periods=[3]):
+                       running_cagr_periods=[3],
+                       plot_rolling_returns_percentiles=True,
+                       rolling_percentiles_to_show=[5, 10, 50, 90, 95],
+                       display_rolling_returns_table=True,
+                       ):
     """
     Compare multiple composite portfolios using a common date grid.
     All portfolios are evaluated on exactly the same set of dates.
@@ -834,16 +1007,24 @@ def compare_portfolios(portfolio_list,
             display_df[col] = display_df[col].round(2).astype(str) + '%'
     print(display_df.to_string())
 
+    # After building all_data, add percentile summary if requested
+    if display_rolling_returns_table and all_data:
+        display_rolling_returns_summary(all_data, rolling_periods, rolling_percentiles_to_show, trading_days_per_year)
+
     # Generate comparison plots (they now automatically use the common grid)
     if len(all_results) > 0:
         print("\n📈 Generating comparison plots...")
-    if plot_comparison:
-        plot_portfolio_comparison(all_data, all_results, rolling_periods)
-    if plot_running_xirr > 0 : 
-        plot_running_xirr_comparison(all_data, all_results)
-    if plot_running_cagr > 0:
-        for period in running_cagr_periods:
-            plot_running_cagr_comparison(all_data, all_results, period)
+        if plot_comparison:
+            plot_portfolio_comparison(all_data, all_results, rolling_periods)
+        if plot_running_xirr > 0 : 
+            plot_running_xirr_comparison(all_data, all_results)
+        if plot_running_cagr > 0:
+            for period in running_cagr_periods:
+                plot_running_cagr_comparison(
+                    all_data, all_results, period, trading_days_per_year,
+                    show_percentiles=plot_rolling_returns_percentiles,
+                    rolling_percentiles_to_show=rolling_percentiles_to_show
+                )
 
     if export_csv:
         fname = f'portfolios_comparison_summary_{output_fname}.csv' if output_fname else 'portfolios_comparison_summary.csv'
