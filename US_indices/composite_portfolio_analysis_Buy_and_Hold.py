@@ -1157,6 +1157,7 @@ def compare_portfolios(portfolio_list,
                 index_number=idx
             )
 
+
             if results and 'summary' in results:
                 all_results[name] = results['summary']
                 all_data[name] = {
@@ -1181,11 +1182,18 @@ def compare_portfolios(portfolio_list,
     combined_df = pd.DataFrame(all_results).T
 
     # (Column ordering as before)
+    # base_cols = [
+    #     'Date Range', 'Total Trading Days', 'Start Value', 'End Value',
+    #     'Total Return %', 'CAGR %', 'Annualized Volatility %', 'Sharpe Ratio',
+    #     'Max Drawdown %', 'Max Drawdown Date', 'SIP XIRR %', 'SIP Return %',
+    #     'SIP Invested Amt', 'SIP Final Amt',
+    #     'Positive Days %', 'Negative Days %', 'Max Daily Return %', 'Min Daily Return %'
+    # ]
     base_cols = [
-        'Date Range', 'Total Trading Days', 'Start Value', 'End Value',
+        'Date Range', 
         'Total Return %', 'CAGR %', 'Annualized Volatility %', 'Sharpe Ratio',
-        'Max Drawdown %', 'Max Drawdown Date', 'SIP XIRR %', 'SIP Return %',
-        'SIP Invested Amt', 'SIP Final Amt',
+        'Max Drawdown %', 'SIP XIRR %', 'SIP Return %',
+        'SIP Invested Amt', 'SIP Final Amt', 'Start Value', 'End Value',
         'Positive Days %', 'Negative Days %', 'Max Daily Return %', 'Min Daily Return %'
     ]
     order = base_cols[:]
