@@ -50,19 +50,70 @@ def _validate_rebalance_config(rebalance_cfg):
     if rebalance_cfg is None:
         return None
     method = rebalance_cfg.get('method', 'threshold')
-    if method != 'threshold':
-        raise ValueError(f"Unsupported rebalance method: {method}")
-    threshold = rebalance_cfg.get('drift_threshold', rebalance_cfg.get('threshold'))
-    if threshold is None:
-        raise ValueError("rebalance_cfg requires 'drift_threshold' for threshold method.")
-    if threshold < 0:
-        raise ValueError("drift_threshold must be >= 0.")
-    min_days = int(rebalance_cfg.get('min_days_between', 0))
-    return {
-        'method': method,
-        'drift_threshold': float(threshold),
-        'min_days_between': min_days
-    }
+    if method == 'threshold':
+        threshold = rebalance_cfg.get('drift_threshold', rebalance_cfg.get('threshold'))
+        if threshold is None:
+            raise ValueError("rebalance_cfg requires 'drift_threshold' for threshold method.")
+        if threshold < 0:
+            raise ValueError("drift_threshold must be >= 0.")
+        min_days = int(rebalance_cfg.get('min_days_between', 0))
+        return {
+            'method': method,
+            'drift_threshold': float(threshold),
+            'min_days_between': min_days
+        }
+    if method == 'interval':
+        interval = rebalance_cfg.get('interval')
+        interval_months = rebalance_cfg.get('interval_months')
+        interval_years = rebalance_cfg.get('interval_years')
+        if interval is None and interval_months is None and interval_years is None:
+            raise ValueError("interval method requires 'interval' or 'interval_months' or 'interval_years'")
+        return {
+            'method': method,
+            'interval': interval,
+            'interval_months': interval_months,
+            'interval_years': interval_years,
+            'min_days_between': int(rebalance_cfg.get('min_days_between', 0))
+        }
+    raise ValueError(f"Unsupported rebalance method: {method}")
+
+
+def _compute_interval_rebalance_dates(date_index, cfg):
+    dates = pd.Index(date_index).sort_values()
+    if len(dates) == 0:
+        return set()
+
+    interval = (cfg.get('interval') or '').lower() if cfg.get('interval') else None
+    interval_months = cfg.get('interval_months')
+    interval_years = cfg.get('interval_years')
+
+    if interval in ['quarterly', 'quarter']:
+        interval_months = 3
+    elif interval in ['biannual', 'bi-annually', 'semiannual', 'semi-annual', 'half-yearly', 'half yearly']:
+        interval_months = 6
+    elif interval in ['annual', 'annually', 'yearly', 'year']:
+        interval_months = 12
+
+    date_series = dates.to_series()
+    is_first_of_month = date_series.dt.to_period('M') != date_series.dt.to_period('M').shift(1)
+
+    if interval_years is not None:
+        interval_years = int(interval_years)
+        base_year = dates[0].year
+        eligible = (date_series.dt.year - base_year) % interval_years == 0
+        is_first_of_year = (date_series.dt.month == 1) & is_first_of_month
+        rebalance_mask = eligible & is_first_of_year
+    else:
+        interval_months = int(interval_months) if interval_months is not None else 12
+        if interval_months <= 0:
+            return set()
+        month_mod = (date_series.dt.month - 1) % interval_months == 0
+        rebalance_mask = is_first_of_month & month_mod
+
+    rebalance_dates = set(dates[rebalance_mask].tolist())
+    if dates[0] in rebalance_dates:
+        rebalance_dates.remove(dates[0])
+    return rebalance_dates
 
 
 def _normalize_tax_config(tax_cfg):
@@ -221,7 +272,7 @@ def build_rebalanced_portfolio_on_grid(portfolio_def, index_data, common_dates,
     portfolio_def : list of (index_name, weight)
     index_data : dict of pd.Series, indexed by Date
     common_dates : iterable of datetime-like
-    rebalance_cfg : dict, must include drift_threshold for method='threshold'
+    rebalance_cfg : dict, threshold-based or interval-based configuration.
     tax_cfg : dict or str, keys: stcg_rate, ltcg_rate, stcg_days, ltcg_days,
               ltcg_exemption, apply_ltcg_exemption; or a profile name from TAX_PROFILES
     return_details : bool, include rebalance/tax metadata
@@ -258,6 +309,9 @@ def build_rebalanced_portfolio_on_grid(portfolio_def, index_data, common_dates,
     pending_tax = 0.0
 
     last_date = None
+    rebalance_dates = set()
+    if rebalance_cfg.get('method') == 'interval':
+        rebalance_dates = _compute_interval_rebalance_dates(date_index, rebalance_cfg)
 
     for date in date_index:
         # Pay prior FY tax on the first trading day of new FY (April)
@@ -315,25 +369,31 @@ def build_rebalanced_portfolio_on_grid(portfolio_def, index_data, common_dates,
         total_value = cash + sum(asset_values.values())
 
         should_rebalance = False
+        drift = []
         if date != first_date and total_value > 0:
-            if (rebalance_cfg['min_days_between'] > 0 and last_rebalance_date is not None):
-                if (date - last_rebalance_date).days < rebalance_cfg['min_days_between']:
-                    should_rebalance = False
-                else:
+            if rebalance_cfg.get('method') == 'interval':
+                if date in rebalance_dates:
                     should_rebalance = True
             else:
-                should_rebalance = True
+                min_days_between = rebalance_cfg.get('min_days_between', 0)
+                if (min_days_between > 0 and last_rebalance_date is not None):
+                    if (date - last_rebalance_date).days < min_days_between:
+                        should_rebalance = False
+                    else:
+                        should_rebalance = True
+                else:
+                    should_rebalance = True
 
-            if should_rebalance:
-                current_weights = {
-                    name: asset_values[name] / total_value for name in names
-                }
-                drift = [
-                    abs(current_weights[name] - target_weights[i])
-                    for i, name in enumerate(names)
-                ]
-                if max(drift) <= rebalance_cfg['drift_threshold']:
-                    should_rebalance = False
+                if should_rebalance:
+                    current_weights = {
+                        name: asset_values[name] / total_value for name in names
+                    }
+                    drift = [
+                        abs(current_weights[name] - target_weights[i])
+                        for i, name in enumerate(names)
+                    ]
+                    if max(drift) <= rebalance_cfg['drift_threshold']:
+                        should_rebalance = False
 
         if should_rebalance:
             weights_before = {
@@ -423,7 +483,8 @@ def build_rebalanced_portfolio_on_grid(portfolio_def, index_data, common_dates,
                     'weights_after': weights_after,
                     'trades': trades,
                     'realized': realized_this,
-                    'drift_max': max(drift) if drift else 0.0
+                    'drift_max': max(drift) if drift else 0.0,
+                    'rebalance_method': rebalance_cfg.get('method')
                 })
 
         # Store end-of-day value (post-rebalance)

@@ -1329,9 +1329,12 @@ def compare_portfolios(portfolio_list,
             if not history:
                 continue
             rows = []
+            rebalance_dates = []
             for entry in history:
                 if entry.get('event') != 'rebalance':
                     continue
+                if entry.get('date') is not None:
+                    rebalance_dates.append(entry['date'])
                 rows.append({
                     'Portfolio': name,
                     'Date': entry.get('date').date() if entry.get('date') is not None else None,
@@ -1347,6 +1350,12 @@ def compare_portfolios(portfolio_list,
             if rows:
                 print(f"\n📑 REBALANCE HISTORY: {name}")
                 print(pd.DataFrame(rows).to_string(index=False))
+                if len(rebalance_dates) > 1:
+                    rebalance_dates = sorted(rebalance_dates)
+                    gaps = [(rebalance_dates[i] - rebalance_dates[i - 1]).days for i in range(1, len(rebalance_dates))]
+                    print(f"   ⏱️  Rebalance gaps (days): count={len(rebalance_dates)}, avg={np.mean(gaps):.1f}, median={np.median(gaps):.1f}, min={np.min(gaps)}, max={np.max(gaps)}")
+                elif len(rebalance_dates) == 1:
+                    print("   ⏱️  Rebalance gaps (days): count=1")
 
     return combined_df
 # =============================================================================
