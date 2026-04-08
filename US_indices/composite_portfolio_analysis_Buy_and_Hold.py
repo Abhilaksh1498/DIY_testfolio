@@ -25,6 +25,7 @@ import warnings
 from IPython.display import display, clear_output
 from ipywidgets import interact, IntSlider, FloatSlider, VBox, Output, SelectionSlider
 import matplotlib.dates as mdates
+from US_indices.rebalance import build_rebalanced_portfolio_on_grid
 
 
 warnings.filterwarnings('ignore')
@@ -465,6 +466,15 @@ def plot_portfolio_comparison(all_data, all_results, rolling_periods):
         if df is not None:
             norm = df['Portfolio_Value'] / df['Portfolio_Value'].iloc[0] * 100
             ax1.plot(df['Date'], norm, linewidth=1.5, color=colors[idx], label=name[:30])
+            rebalance_dates = ddict.get('rebalance_dates')
+            if rebalance_dates:
+                rebalance_series = df.set_index('Date')['Portfolio_Value']
+                mark_dates = [d for d in rebalance_dates if d in rebalance_series.index]
+                if mark_dates:
+                    mark_vals = (rebalance_series.loc[mark_dates] /
+                                 df['Portfolio_Value'].iloc[0] * 100)
+                    ax1.scatter(mark_dates, mark_vals, color=colors[idx],
+                                s=18, alpha=0.7, marker='x')
     ax1.set_title('Normalized Performance (Start = 100)')
     ax1.set_xlabel('Date')
     ax1.set_ylabel('Normalized Value')
@@ -1066,12 +1076,40 @@ def compare_portfolios(portfolio_list,
                        plot_rolling_returns_percentiles=True,
                        rolling_percentiles_to_show=[5, 10, 50, 90, 95],
                        display_rolling_returns_table=True,
-                       interactive_cagr=False
+                       interactive_cagr=False,
+                       rebalance=None,
+                       tax_config=None,
+                       plot_rebalance_marks=False,
+                       show_rebalance_history=False
                        ):
     """
     Compare multiple composite portfolios using a common date grid.
     All portfolios are evaluated on exactly the same set of dates.
     """
+    def resolve_tax_config(cfg, port_name, idx, total_ports):
+        if cfg is None:
+            return None
+        if isinstance(cfg, (list, tuple)):
+            if len(cfg) != total_ports:
+                raise ValueError("tax_config list must match number of portfolios")
+            return cfg[idx]
+        if isinstance(cfg, dict):
+            tax_keys = {'stcg_rate', 'ltcg_rate', 'stcg_days', 'ltcg_days', 'ltcg_exemption', 'apply_ltcg_exemption'}
+            if tax_keys.intersection(cfg.keys()):
+                return cfg
+            if port_name in cfg or 'default' in cfg:
+                return cfg.get(port_name, cfg.get('default'))
+        return cfg
+
+    def resolve_rebalance_config(port_dict):
+        if 'rebalance' in port_dict:
+            port_reb = port_dict.get('rebalance')
+            if port_reb == 'no_rebalance':
+                return None
+            return port_reb
+        if rebalance == 'no_rebalance':
+            return None
+        return rebalance
     # ---------------------------------------------------------------------
     # STEP 1: Collect all unique index names across all portfolios
     # ---------------------------------------------------------------------
@@ -1139,9 +1177,29 @@ def compare_portfolios(portfolio_list,
 
         try:
             # Build portfolio using the pre‑computed common grid
-            port_df = build_portfolio_series_on_grid(
-                weights, index_data, common_dates
-            )
+            port_reb_cfg = resolve_rebalance_config(port)
+            if port_reb_cfg:
+                port_tax_cfg = port.get('tax_config')
+                if port_tax_cfg is None:
+                    port_tax_cfg = resolve_tax_config(tax_config, name, idx - 1, len(portfolio_list))
+                if port_tax_cfg is None:
+                    raise ValueError(f"tax_config is required for rebalanced portfolio: {name}")
+                need_dates = plot_rebalance_marks
+                need_history = show_rebalance_history
+                need_details = need_dates or need_history
+                if need_details:
+                    reb_result = build_rebalanced_portfolio_on_grid(
+                        weights, index_data, common_dates, port_reb_cfg, port_tax_cfg, return_details=True
+                    )
+                    port_df = reb_result['data']
+                else:
+                    port_df = build_rebalanced_portfolio_on_grid(
+                        weights, index_data, common_dates, port_reb_cfg, port_tax_cfg
+                    )
+            else:
+                port_df = build_portfolio_series_on_grid(
+                    weights, index_data, common_dates
+                )
 
             # Analyze it
             results = analyze_portfolio(
@@ -1164,6 +1222,15 @@ def compare_portfolios(portfolio_list,
                     'data': results.get('data'),
                     'sip_xirr': results.get('sip_xirr_series')
                 }
+                if port_reb_cfg and need_details:
+                    rebalance_entries = reb_result.get('rebalance_log', [])
+                    if need_dates:
+                        rebalance_dates = [
+                            e['date'] for e in rebalance_entries if e.get('event') == 'rebalance'
+                        ]
+                        all_data[name]['rebalance_dates'] = rebalance_dates
+                    if need_history:
+                        all_data[name]['rebalance_history'] = rebalance_entries
                 print(f"✅ Successfully processed: {name}")
             else:
                 print(f"⚠️  No results for: {name}")
@@ -1255,6 +1322,31 @@ def compare_portfolios(portfolio_list,
         fname = f'portfolios_comparison_summary_{output_fname}.csv' if output_fname else 'portfolios_comparison_summary.csv'
         combined_df.to_csv(fname)
         print(f"\n📁 Exported: {fname}")
+
+    if show_rebalance_history:
+        for name, data_dict in all_data.items():
+            history = data_dict.get('rebalance_history')
+            if not history:
+                continue
+            rows = []
+            for entry in history:
+                if entry.get('event') != 'rebalance':
+                    continue
+                rows.append({
+                    'Portfolio': name,
+                    'Date': entry.get('date').date() if entry.get('date') is not None else None,
+                    'Weights Before': entry.get('weights_before'),
+                    'Weights After': entry.get('weights_after'),
+                    'Sells': entry.get('trades', {}).get('sells'),
+                    'Buys': entry.get('trades', {}).get('buys'),
+                    'ST Gain': entry.get('realized', {}).get('st_gain'),
+                    'LT Gain': entry.get('realized', {}).get('lt_gain'),
+                    'ST Loss': entry.get('realized', {}).get('st_loss'),
+                    'LT Loss': entry.get('realized', {}).get('lt_loss')
+                })
+            if rows:
+                print(f"\n📑 REBALANCE HISTORY: {name}")
+                print(pd.DataFrame(rows).to_string(index=False))
 
     return combined_df
 # =============================================================================
