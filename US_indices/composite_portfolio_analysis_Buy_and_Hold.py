@@ -26,6 +26,7 @@ from IPython.display import display, clear_output
 from ipywidgets import interact, IntSlider, FloatSlider, VBox, Output, SelectionSlider
 import matplotlib.dates as mdates
 from US_indices.rebalance import build_rebalanced_portfolio_on_grid
+from US_indices.profit_booking import build_profit_booking_portfolio_on_grid
 
 
 warnings.filterwarnings('ignore')
@@ -66,9 +67,14 @@ def calculate_xirr(flows, dates, guess=0.1):
 
     rate = guess
     for _ in range(100):
-        f = npv(rate)
-        f_prime = sum(-f * d / (365 * (1 + rate) ** (d / 365 + 1))
-                      for f, d in zip(flows, days))
+        if rate <= -0.9999 or rate > 100:
+            return None
+        try:
+            f = npv(rate)
+            f_prime = sum(-f * d / (365 * (1 + rate) ** (d / 365 + 1))
+                          for f, d in zip(flows, days))
+        except OverflowError:
+            return None
         if abs(f_prime) < 1e-10:
             break
         new_rate = rate - f / f_prime
@@ -1079,8 +1085,11 @@ def compare_portfolios(portfolio_list,
                        interactive_cagr=False,
                        rebalance=None,
                        tax_config=None,
+                       profit_booking=None,
+                       cash_config=None,
                        plot_rebalance_marks=False,
-                       show_rebalance_history=False
+                       show_rebalance_history=False,
+                       show_profit_booking_history=False
                        ):
     """
     Compare multiple composite portfolios using a common date grid.
@@ -1110,6 +1119,25 @@ def compare_portfolios(portfolio_list,
         if rebalance == 'no_rebalance':
             return None
         return rebalance
+
+    def resolve_profit_booking_config(port_dict):
+        if 'profit_booking' in port_dict:
+            port_pb = port_dict.get('profit_booking')
+            if port_pb == 'no_profit_booking':
+                return None
+            return port_pb
+        if profit_booking == 'no_profit_booking':
+            return None
+        return profit_booking
+
+    def resolve_cash_series_name(port_dict):
+        port_pb = resolve_profit_booking_config(port_dict)
+        if not port_pb:
+            return None
+        port_cash_cfg = port_dict.get('cash_config', cash_config)
+        if not port_cash_cfg or port_cash_cfg.get('type') != 'series':
+            return None
+        return port_cash_cfg.get('series_name')
     # ---------------------------------------------------------------------
     # STEP 1: Collect all unique index names across all portfolios
     # ---------------------------------------------------------------------
@@ -1163,6 +1191,21 @@ def compare_portfolios(portfolio_list,
     common_dates = common_dates.sort_values()
     print(f"\n✅ Global common date grid: {common_dates.min().date()} to {common_dates.max().date()} ({len(common_dates)} days)")
 
+    cash_series_names = set()
+    for port in portfolio_list:
+        name = resolve_cash_series_name(port)
+        if name:
+            cash_series_names.add(name)
+
+    for series_name in cash_series_names:
+        df = load_index_files(series_name, search_path, recursive, data_format=data_format)
+        if df is None or len(df) == 0:
+            raise ValueError(f"Could not load cash series data for {series_name}")
+        value_col = [c for c in df.columns if c != 'Date'][0]
+        df = df.rename(columns={value_col: series_name})
+        df = df.set_index('Date')
+        index_data[series_name] = df[series_name]
+
     # ---------------------------------------------------------------------
     # STEP 3: Build each portfolio on the common date grid
     # ---------------------------------------------------------------------
@@ -1178,6 +1221,9 @@ def compare_portfolios(portfolio_list,
         try:
             # Build portfolio using the pre‑computed common grid
             port_reb_cfg = resolve_rebalance_config(port)
+            port_pb_cfg = resolve_profit_booking_config(port)
+            if port_reb_cfg and port_pb_cfg:
+                raise ValueError(f"Cannot combine rebalance and profit_booking yet: {name}")
             if port_reb_cfg:
                 port_tax_cfg = port.get('tax_config')
                 if port_tax_cfg is None:
@@ -1195,6 +1241,21 @@ def compare_portfolios(portfolio_list,
                 else:
                     port_df = build_rebalanced_portfolio_on_grid(
                         weights, index_data, common_dates, port_reb_cfg, port_tax_cfg
+                    )
+            elif port_pb_cfg:
+                port_tax_cfg = port.get('tax_config')
+                if port_tax_cfg is None:
+                    port_tax_cfg = resolve_tax_config(tax_config, name, idx - 1, len(portfolio_list))
+                port_cash_cfg = port.get('cash_config', cash_config)
+                need_history = show_profit_booking_history
+                if need_history:
+                    pb_result = build_profit_booking_portfolio_on_grid(
+                        weights, index_data, common_dates, port_pb_cfg, port_cash_cfg, port_tax_cfg, return_details=True
+                    )
+                    port_df = pb_result['data']
+                else:
+                    port_df = build_profit_booking_portfolio_on_grid(
+                        weights, index_data, common_dates, port_pb_cfg, port_cash_cfg, port_tax_cfg
                     )
             else:
                 port_df = build_portfolio_series_on_grid(
@@ -1231,6 +1292,9 @@ def compare_portfolios(portfolio_list,
                         all_data[name]['rebalance_dates'] = rebalance_dates
                     if need_history:
                         all_data[name]['rebalance_history'] = rebalance_entries
+                if port_pb_cfg and show_profit_booking_history:
+                    pb_entries = pb_result.get('profit_booking_log', [])
+                    all_data[name]['profit_booking_history'] = pb_entries
                 print(f"✅ Successfully processed: {name}")
             else:
                 print(f"⚠️  No results for: {name}")
@@ -1356,6 +1420,41 @@ def compare_portfolios(portfolio_list,
                     print(f"   ⏱️  Rebalance gaps (days): count={len(rebalance_dates)}, avg={np.mean(gaps):.1f}, median={np.median(gaps):.1f}, min={np.min(gaps)}, max={np.max(gaps)}")
                 elif len(rebalance_dates) == 1:
                     print("   ⏱️  Rebalance gaps (days): count=1")
+
+    if show_profit_booking_history:
+        for name, data_dict in all_data.items():
+            history = data_dict.get('profit_booking_history')
+            if not history:
+                continue
+            pb_count = sum(1 for e in history if e.get('event') == 'profit_booking')
+            re_count = sum(1 for e in history if e.get('event') == 'reentry')
+            rows = []
+            for entry in history:
+                if entry.get('event') not in ['profit_booking', 'reentry']:
+                    continue
+                rows.append({
+                    'Portfolio': name,
+                    'Date': entry.get('date').date() if entry.get('date') is not None else None,
+                    'Event': entry.get('event'),
+                    'Asset': entry.get('asset'),
+                    'Percentile': round(entry.get('percentile', 0.0), 2),
+                    'CAGR': round(entry.get('cagr', 0.0) * 100, 2) if entry.get('cagr') is not None else None,
+                    'Units Sold': entry.get('units_sold'),
+                    'Units Bought': entry.get('units_bought'),
+                    'Value': entry.get('value'),
+                    'Cash After': entry.get('cash_after'),
+                    'ST Gain': entry.get('st_gain'),
+                    'LT Gain': entry.get('lt_gain'),
+                    'ST Loss': entry.get('st_loss'),
+                    'LT Loss': entry.get('lt_loss')
+                })
+            if rows:
+                print(f"\n📑 PROFIT BOOKING HISTORY: {name}")
+                print(pd.DataFrame(rows).to_string(index=False))
+                print(f"   📌 Summary: profit_bookings={pb_count}, reentries={re_count}")
+            else:
+                print(f"\n📑 PROFIT BOOKING HISTORY: {name}")
+                print(f"   📌 Summary: profit_bookings={pb_count}, reentries={re_count}")
 
     return combined_df
 # =============================================================================
